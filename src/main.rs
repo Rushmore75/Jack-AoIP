@@ -14,30 +14,32 @@ fn main() {
 buffer size of jack
  */
 const BUFFER_SIZE: usize = 2048;
+// TODO send address, so it can be configured on multiple systems where these would be different.
 const RECV_ADDR: &str = "127.0.0.1:5001";
 
 async fn async_start() {
+    // TODO when multiple connections are going they are not mapped 0 -> 0 , 1->1, etc... :(
     
     let receive = thread::spawn(|| {
         let listen = TcpListener::bind(RECV_ADDR).unwrap();
 
         let recv_socket = AoIP(Tcp::Listener(listen));
         // start_receive(recv_socket);
-        start_on_transport(recv_socket, jack::AudioOut::default());
+        start_on_transport(recv_socket, jack::AudioOut::default(), 2);
     });
     
     let send = thread::spawn(|| {
         
         let stream = TcpStream::connect(RECV_ADDR).unwrap();
         let send_socket = AoIP(Tcp::Stream(stream));
-        start_on_transport(send_socket, jack::AudioIn::default());
+        start_on_transport(send_socket, jack::AudioIn::default(), 2);
     });
     
     send.join().unwrap();
     receive.join().unwrap();
 }
 
-fn start_on_transport<P>(mut socket: AoIP, port_spec: P) where P: 'static + PortSpec + Send + Copy {
+fn start_on_transport<P>(mut socket: AoIP, port_spec: P, connections: u32) where P: 'static + PortSpec + Send + Copy {
 
     // Get the client data
     let (client, _status) = Client::new(
@@ -48,9 +50,9 @@ fn start_on_transport<P>(mut socket: AoIP, port_spec: P) where P: 'static + Port
     
     // make a large number of ports
     let mut vec = Vec::new();
-    for i in 0..1 { 
+    for i in 0..connections { 
         let port = client.register_port(
-            &format!("{}_{}", i, "in"),
+            &format!("{}_{}", "port", i),
             port_spec)
             .unwrap(); 
         vec.push(port);
@@ -104,6 +106,7 @@ fn start_on_transport<P>(mut socket: AoIP, port_spec: P) where P: 'static + Port
     loop{}
 }
 
+// TODO make a udp version
 pub struct AoIP(Tcp);
 enum Tcp {
     /** Used for both stream data *to* and *from* a socket. */
@@ -259,7 +262,8 @@ impl jack::NotificationHandler for Notifications {
     }
 
     fn xrun(&mut self, _: &jack::Client) -> jack::Control {
-        println!("JACK: xrun occurred");
+        // I don't need this telling me I have xruns, I can see that in Catia
+        // println!("JACK: xrun occurred");
         jack::Control::Continue
     }
 }
