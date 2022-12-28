@@ -1,5 +1,5 @@
-use crate::{BUFFER_SIZE, RECV_ADDR, SEND_ADDR};
-use std::{net::{TcpStream, TcpListener, UdpSocket}, process::exit, io::{Write, Read, ErrorKind}};
+use crate::BUFFER_SIZE;
+use std::{net::{TcpStream, TcpListener, UdpSocket}, process::exit, io::{Write, Read}};
 
 
 /**
@@ -135,7 +135,7 @@ pub enum Tcp {
     /** Used for both stream data *to* and *from* a socket. */
     Stream(TcpStream),
     /** It will only be a listener long enough to find a stream to convert into. */
-    Listener(TcpListener)
+    _Listener(TcpListener)
 }
 
 impl NetworkModel for Tcp {
@@ -144,7 +144,7 @@ impl NetworkModel for Tcp {
         let out_buffer = f32_to_u8_array(buffer);
         
         let mut stream = match &self {
-            Tcp::Listener(_) => {
+            Tcp::_Listener(_) => {
                 println!("Why are you sending on a listening connection?");
                 exit(1)
             },
@@ -158,7 +158,7 @@ impl NetworkModel for Tcp {
         // Handle tcp stream
         let mut stream = match &self {
             Tcp::Stream(s) => s,
-            Tcp::Listener(l) => {
+            Tcp::_Listener(l) => {
                 match l.accept() {
                     Ok((stream, addr)) => {
                         // This code block will run once, converting
@@ -193,9 +193,18 @@ impl NetworkModel for Tcp {
 }
 
 /**
-A UDP socket, to be used for sending audio over ip. Preferably you would connect
-it prior to using the connection. But if you don't it will use the `SEND_ADDR` and
-`RECV_ADDR` as defined in main to connect it's self.
+A UDP socket, to be used for sending audio over ip.
+You need to connect the socket before passing it here.
+
+Creating the receiving socket. The only thing that would
+change for the sending socket is swapping RECV_ADDR <-> SEND_ADDR
+```
+
+let socket = UdpSocket::bind(RECV_ADDR).unwrap();
+socket.connect(SEND_ADDR).unwrap();
+let aoip = AoIP(Udp(socket));
+
+```
  */
 pub struct Udp(pub UdpSocket);
 
@@ -205,39 +214,16 @@ impl NetworkModel for Udp {
 
         let array = f32_to_u8_array(buffer);
         
-        match self.0.send(&array) {
-            Ok(_) => {},
-            Err(e) => match e.kind() {
-                // If the socket isn't connected, this is an easy remedy.
-                ErrorKind::NotConnected => {
-                    // connect the opposite ip
-                    // TODO, not sure this works
-                    self.0.connect(RECV_ADDR).unwrap();
-                    println!("I had to start a connection for you.")
-                },
-                _ => {},
-            },
-        };
+        // If this says set a destination address, this can't be recovered from here as
+        // you probably didn't set a receiving address either, which we can't change from here.
+        self.0.send(&array).unwrap();
     }
 
     fn receive(&mut self, buffer: &mut [f32]) {
 
         let mut internal_buffer = [0u8; BUFFER_SIZE*4];
 
-        match self.0.recv(&mut internal_buffer) {
-            Ok(_) => {},
-            Err(e) => match e.kind() {
-                ErrorKind::NotConnected => {
-                    // connect the socket, this will mean that the
-                    // current incoming buffer will just be zeros.
-                    // TODO not sure this works
-                    self.0.connect(SEND_ADDR).unwrap();
-                    println!("I had to start a connection for you.")
-                },
-                // std::io::ErrorKind::BrokenPipe => todo!(),
-                _ => todo!(),
-            },
-        };
+        self.0.recv(&mut internal_buffer).unwrap();
 
         u8_to_f32_array(&internal_buffer, buffer);
     }
