@@ -126,7 +126,6 @@ impl AoIP {
 
             // copy the new array into the buffer
             for byte_index in 0..4 {
-                // TODO curious about the integrity of this math
                 out_buffer[buf_index*4+byte_index] = bytes[byte_index];
             }   
         }
