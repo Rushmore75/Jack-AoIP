@@ -7,6 +7,9 @@ Convert an array of `f32` into an array of `u8`.
 This is with the purposes of jack in mind. So the input array should equal `BUFFER_SIZE`.
 There are, however, no checks on this. It will probably just go out of bounds if that happens,
 which will panic the whole program. You should have no problem passing in arrays taken from jack tho.
+
+
+# How to obtain f32 array:
 ```
 // This code is taken from the impl of Port<AudioIn>
 
@@ -18,20 +21,23 @@ let slice: &[f32] = unsafe {
     )
 }
 ``` 
+
+# New Docs:
+Pass the array of `[f32]` into the function along with the `[u8]` array for the
+converted `f32`s to be placed in. The `[u8]` array needs to be ***x4*** longer
+that the `[f32]` array. (`1 f32 == 4 u8`)
+
 */
 #[inline]
-fn f32_to_u8_array(array: &[f32]) -> [u8; BUFFER_SIZE*4] {
-    let mut out_buffer = [0u8; BUFFER_SIZE*4];
-
+fn f32_to_u8_array(array: &[f32], output: &mut [u8]) {
     for array_index in 0..array.len() {
         // convert the f32 to [u8; 4]
         let bytes = array[array_index].to_be_bytes(); // big endian is network order
         // copy the new array into the buffer
         for byte_index in 0..4 {
-            out_buffer[array_index*4+byte_index] = bytes[byte_index];
+            output[array_index*4+byte_index] = bytes[byte_index];
         }   
     }
-    out_buffer
 }
 
 /**
@@ -141,7 +147,9 @@ pub enum Tcp {
 impl NetworkModel for Tcp {
 
     fn send(&mut self, buffer: &[f32]) {
-        let out_buffer = f32_to_u8_array(buffer);
+        let mut internal_buffer = [0u8; BUFFER_SIZE*4];
+
+        f32_to_u8_array(buffer, &mut internal_buffer);
         
         let mut stream = match &self {
             Tcp::_Listener(_) => {
@@ -150,7 +158,7 @@ impl NetworkModel for Tcp {
             },
             Tcp::Stream(s) => s,
         };
-        stream.write(&out_buffer).unwrap();
+        stream.write(&internal_buffer).unwrap();
     }
 
     fn receive(&mut self, buffer: &mut [f32]) {
@@ -212,11 +220,13 @@ impl NetworkModel for Udp {
 
     fn send(&mut self, buffer: &[f32]) {
 
-        let array = f32_to_u8_array(buffer);
+        let mut internal_buffer = [0u8; BUFFER_SIZE*4];
+
+        f32_to_u8_array(buffer, &mut internal_buffer);
         
         // If this says set a destination address, this can't be recovered from here as
         // you probably didn't set a receiving address either, which we can't change from here.
-        self.0.send(&array).unwrap();
+        self.0.send(&internal_buffer).unwrap();
     }
 
     fn receive(&mut self, buffer: &mut [f32]) {
