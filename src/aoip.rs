@@ -85,14 +85,16 @@ to `2048` before getting Xruns on `tcp`. While I got down to `265` using `udp`. 
 other applications (firefox) started giving Xruns as well. Using `128` started to get too many
 Xruns to be considered "good" (but still better than `tcp @ 1024`!)
 
-## Example usage
+---
+
+# Example usage
 These examples assume you have send and receive address setup, ex:
 ```
 const SEND_ADDR: &str = "127.0.0.1:6001";
 const RECV_ADDR: &str = "127.0.0.1:5001";
 ```
-
-### Using a udp connection:
+---
+## Using a udp connection:
 Faster, and probably a better choice for sending audio.
 ```   
 let receive = thread::spawn(|| {
@@ -114,8 +116,8 @@ let send = thread::spawn(|| {
 send.join().unwrap();
 receive.join().unwrap();
 ```
-
-### Using a tcp connection:
+---
+## Using a tcp connection:
 Setup is basically the same as udp, this connection however will be (***a lot***) slower.
 Unless you have a *very* good reason your should use udp.
 ```
@@ -147,10 +149,11 @@ pub enum Tcp {
 impl NetworkModel for Tcp {
 
     fn send(&mut self, buffer: &[f32]) {
-        let mut internal_buffer = [0u8; BUFFER_SIZE*4];
-
-        f32_to_u8_array(buffer, &mut internal_buffer);
+        // Generate buffer and load f32s (converted into u8) into it
+        let mut send_buffer = [0u8; BUFFER_SIZE*4];
+        f32_to_u8_array(buffer, &mut send_buffer);
         
+        // Get the stream from self
         let mut stream = match &self {
             Tcp::_Listener(_) => {
                 println!("Why are you sending on a listening connection?");
@@ -158,11 +161,11 @@ impl NetworkModel for Tcp {
             },
             Tcp::Stream(s) => s,
         };
-        stream.write(&internal_buffer).unwrap();
+        // Write out data
+        stream.write(&send_buffer).unwrap();
     }
 
     fn receive(&mut self, buffer: &mut [f32]) {
-        let mut recv_buffer = [0u8; BUFFER_SIZE*4];
         // Handle tcp stream
         let mut stream = match &self {
             Tcp::Stream(s) => s,
@@ -181,21 +184,23 @@ impl NetworkModel for Tcp {
                 }
             },
         };
+
+        let mut recv_buffer = [0u8; BUFFER_SIZE*4];
         //  This is slow, you might need to increase your buffer size if you are getting xruns
         stream.read(&mut recv_buffer).unwrap();
 
-
+        // convert the read buffer into f32s for the output buffer
         u8_to_f32_array(&recv_buffer, buffer);
 
-        for buffer_index in 0..buffer.len() {
-            let mut byte_array:[u8;4]=[0;4];
-            // put the four u8 into a sized array
-            for i in 0..4 { byte_array[i] =  recv_buffer[buffer_index*4+i]; }
-            // convert the byte array into a f32
-            let f: f32 = f32::from_be_bytes(byte_array);
-            // place into buffer
-            buffer[buffer_index] = f;
-        }
+        // for buffer_index in 0..buffer.len() {
+        //     let mut byte_array:[u8;4]=[0;4];
+        //     // put the four u8 into a sized array
+        //     for i in 0..4 { byte_array[i] =  recv_buffer[buffer_index*4+i]; }
+        //     // convert the byte array into a f32
+        //     let f: f32 = f32::from_be_bytes(byte_array);
+        //     // place into buffer
+        //     buffer[buffer_index] = f;
+        // }
     }
 
 }
@@ -220,21 +225,24 @@ impl NetworkModel for Udp {
 
     fn send(&mut self, buffer: &[f32]) {
 
-        let mut internal_buffer = [0u8; BUFFER_SIZE*4];
+        let mut send_buffer = [0u8; BUFFER_SIZE*4];
 
-        f32_to_u8_array(buffer, &mut internal_buffer);
+        f32_to_u8_array(buffer, &mut send_buffer);
         
         // If this says set a destination address, this can't be recovered from here as
         // you probably didn't set a receiving address either, which we can't change from here.
-        self.0.send(&internal_buffer).unwrap();
+        self.0.send(&send_buffer).unwrap();
     }
 
     fn receive(&mut self, buffer: &mut [f32]) {
 
-        let mut internal_buffer = [0u8; BUFFER_SIZE*4];
+        let mut recv_buffer = [0u8; BUFFER_SIZE*4];
 
-        self.0.recv(&mut internal_buffer).unwrap();
+        self.0.recv(&mut recv_buffer).unwrap();
 
-        u8_to_f32_array(&internal_buffer, buffer);
+        // slices could work...
+        // u8_to_f32_array(&recv_buffer[..BUFFER_SIZE*4], buffer);
+
+        u8_to_f32_array(&recv_buffer, buffer);
     }
 }

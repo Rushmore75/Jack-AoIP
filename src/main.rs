@@ -4,40 +4,109 @@ mod notification;
 mod aoip;
 
 use core::slice;
-use std::{net::{UdpSocket}, thread, process::ExitCode};
+use std::{net::{UdpSocket, ToSocketAddrs, TcpListener, TcpStream}, thread::{self, JoinHandle}, process::ExitCode};
 
-use aoip::{AoIP, NetworkModel, Udp};
+use aoip::{AoIP, NetworkModel, Udp, Tcp};
 use jack::{Client, Control, ClosureProcessHandler, ProcessScope, PortSpec, jack_sys::{JackPortIsInput, JackPortIsOutput}};
 use notification::Notifications;
 /**
 buffer size of jack
  */
 const BUFFER_SIZE: usize = 1024;
-const SEND_ADDR: &str = "127.0.0.1:6001";
-const RECV_ADDR: &str = "127.0.0.1:5001";
+const LOCAL_ADDR: &str = "127.0.0.1:8096";
+const REMOTE_ADDR: &str = "192.168.1.199:8096";
 
 fn main() {
     // TODO when the program stops it generates a handful of Xruns, this is probably
     // due to not stopping cleanly...
+    // TODO test mapping of large amount of connections
+    // TODO allow for buffer size to be chosen after compile, via lazy static and array slices
 
-    let receive = thread::spawn(|| {
-        let socket = UdpSocket::bind(RECV_ADDR).unwrap();
-        socket.connect(SEND_ADDR).unwrap();
+    let source = start_udp_source(REMOTE_ADDR, LOCAL_ADDR, 2);
+    // let sink = start_udp_sink(REMOTE_ADDR, LOCAL_ADDR, 2);
+
+    source.join().unwrap();
+    // sink.join().unwrap();
+}
+
+/**
+# Usage
+The udp source will create an audio output for you to use.
+Local address is your `address:port` and remote address is the `address:port`
+from where you are (expecting) to receive audio.
+```
+// As such:
+let source = start_udp_source(SEND_ADDR, RECV_ADDR, 2);
+source.join().unwrap();
+```
+ */
+pub fn start_udp_source<A>(remote_addr: A, local_addr: A, connections: u32) -> JoinHandle<()>
+where A: 'static + ToSocketAddrs + Send + Copy + Sync
+{
+    let receive = thread::spawn(move || {
+        let socket = UdpSocket::bind(local_addr).unwrap();
+        socket.connect(remote_addr).unwrap();
         let aoip = AoIP(Udp(socket));
     
-        start_on_transport(aoip, jack::AudioOut::default(), 2);
+        start_on_transport(aoip, jack::AudioOut::default(), connections);
     });
-    
-    let send = thread::spawn(|| {
-        let socket = UdpSocket::bind(SEND_ADDR).unwrap();
-        socket.connect(RECV_ADDR).unwrap();
+
+    receive
+}
+
+/**
+# Usage
+The udp sink will collect and send audio to be collected by a source somewhere.
+Local address is your `address:port` while remote address is the `address:port`
+to where you (are expecting) a source to be to collect the audio.
+```
+// As such:
+let sink = start_udp_sink(RECV_ADDR, SEND_ADDR, 2);
+sink.join().unwrap();
+```
+ */
+pub fn start_udp_sink<A>(remote_addr: A, local_addr: A, connections: u32) -> JoinHandle<()>
+where A: 'static + ToSocketAddrs + Send + Copy + Sync
+{
+    let send = thread::spawn(move || {
+        let socket = UdpSocket::bind(local_addr).unwrap();
+        socket.connect(remote_addr).unwrap();
         let aoip = AoIP(Udp(socket));
         
-        start_on_transport(aoip, jack::AudioIn::default(), 2);
+        start_on_transport(aoip, jack::AudioIn::default(), connections);
     });
     
-    send.join().unwrap();
-    receive.join().unwrap();
+    send
+}
+
+
+/**
+Untested, why would you use tcp?
+ */
+pub fn start_tcp_sink<A>(remote_addr: A) -> JoinHandle<()>
+where A: 'static + ToSocketAddrs + Send + Copy + Sync
+{  
+    let send = thread::spawn(move || {
+        let stream: TcpStream = TcpStream::connect(remote_addr).unwrap();
+        let send_socket: AoIP<Tcp> = AoIP(Tcp::Stream(stream));
+        start_on_transport(send_socket, jack::AudioIn::default(), 2);
+    });
+    
+    send    
+}
+
+/**
+Untested, why would you use tcp?
+ */
+pub fn start_tcp_source<A>(local_addr: A) -> JoinHandle<()>
+where A: 'static + ToSocketAddrs + Send + Copy + Sync
+{
+    let receive = thread::spawn(move || {
+        let listen: TcpListener = TcpListener::bind(local_addr).unwrap();
+        let recv_socket: AoIP<Tcp> = AoIP(Tcp::_Listener(listen));
+        start_on_transport(recv_socket, jack::AudioOut::default(), 2);
+    });
+    receive
 }
 
 fn start_on_transport<P, T>(mut socket: AoIP<T>, port_spec: P, connections: u32) -> ExitCode
@@ -86,7 +155,6 @@ where P: 'static + PortSpec + Send + Copy, T: 'static + NetworkModel + Sized + S
         return ExitCode::FAILURE
     }
 
-    
     // Create ports
     let mut vec = Vec::new();
     for i in 0..connections { 
