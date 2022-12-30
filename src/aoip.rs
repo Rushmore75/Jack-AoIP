@@ -231,7 +231,7 @@ impl NetworkModel for Udp {
         
         // If this says set a destination address, this can't be recovered from here as
         // you probably didn't set a receiving address either, which we can't change from here.
-        self.0.send(&send_buffer).unwrap();
+        self.0.send(&send_buffer).unwrap(); // TODO make this a clean shutdown of Err
     }
 
     fn receive(&mut self, buffer: &mut [f32]) {

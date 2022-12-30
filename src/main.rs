@@ -13,20 +13,22 @@ use notification::Notifications;
 buffer size of jack
  */
 const BUFFER_SIZE: usize = 1024;
-const LOCAL_ADDR: &str = "127.0.0.1:8096";
-const REMOTE_ADDR: &str = "192.168.1.199:8096";
+const LOCAL_ADDR: &str = "192.168.1.199:8096";
+const REMOTE_ADDR: &str = "192.168.1.42:8096";
 
 fn main() {
     // TODO when the program stops it generates a handful of Xruns, this is probably
     // due to not stopping cleanly...
     // TODO test mapping of large amount of connections
     // TODO allow for buffer size to be chosen after compile, via lazy static and array slices
+    // TODO put in a buffer of 0s when transport stops
+    // TODO add transport control / syncing
 
     let source = start_udp_source(REMOTE_ADDR, LOCAL_ADDR, 2);
-    // let sink = start_udp_sink(REMOTE_ADDR, LOCAL_ADDR, 2);
+    let sink = start_udp_sink(REMOTE_ADDR, LOCAL_ADDR, 2);
 
     source.join().unwrap();
-    // sink.join().unwrap();
+    sink.join().unwrap();
 }
 
 /**
@@ -72,7 +74,6 @@ where A: 'static + ToSocketAddrs + Send + Copy + Sync
         let socket = UdpSocket::bind(local_addr).unwrap();
         socket.connect(remote_addr).unwrap();
         let aoip = AoIP(Udp(socket));
-        
         start_on_transport(aoip, jack::AudioIn::default(), connections);
     });
     
