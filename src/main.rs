@@ -2,13 +2,15 @@
 
 mod notification;
 mod aoip;
+mod synchronization;
 
 use core::slice;
-use std::{net::{UdpSocket, ToSocketAddrs, TcpListener, TcpStream}, thread::{self, JoinHandle}, process::ExitCode};
+use std::{net::{UdpSocket, ToSocketAddrs}, thread::{self, ScopedJoinHandle, Scope}, process::ExitCode, sync::RwLock, hint::black_box};
 
-use aoip::{AoIP, NetworkModel, Udp, Tcp};
+use aoip::{AoIP, NetworkModel, Udp};
 use jack::{Client, Control, ClosureProcessHandler, ProcessScope, PortSpec, jack_sys::{JackPortIsInput, JackPortIsOutput}};
 use notification::Notifications;
+use synchronization::SyncStatus;
 /**
 buffer size of jack
  */
@@ -17,18 +19,31 @@ const LOCAL_ADDR: &str = "192.168.1.199:8096";
 const REMOTE_ADDR: &str = "192.168.1.42:8096";
 
 fn main() {
-    // TODO when the program stops it generates a handful of Xruns, this is probably
-    // due to not stopping cleanly...
-    // TODO test mapping of large amount of connections
-    // TODO allow for buffer size to be chosen after compile, via lazy static and array slices
-    // TODO put in a buffer of 0s when transport stops
-    // TODO add transport control / syncing
+    let sync = SyncStatus {
+        running: false,
+    };
+    // This *may* deadlock, should be fun testing
+    let rw_sync = RwLock::new(sync);
+    
+    
+    thread::scope(|scope| {
 
-    let source = start_udp_source(REMOTE_ADDR, LOCAL_ADDR, 2);
-    let sink = start_udp_sink(REMOTE_ADDR, LOCAL_ADDR, 2);
+        let source = start_udp_source(REMOTE_ADDR, LOCAL_ADDR, 2, &rw_sync, scope);
+        let sink = start_udp_sink(REMOTE_ADDR, LOCAL_ADDR, 2, &rw_sync, scope);
+        // Do state stuff here.
 
-    source.join().unwrap();
-    sink.join().unwrap();
+
+        let mut rw = rw_sync.write().unwrap();
+        rw.running = false;
+        
+
+
+        source.join().unwrap();
+        sink.join().unwrap();
+    });
+
+    // source.join().unwrap();
+    // sink.join().unwrap();
 }
 
 /**
@@ -42,18 +57,15 @@ let source = start_udp_source(SEND_ADDR, RECV_ADDR, 2);
 source.join().unwrap();
 ```
  */
-pub fn start_udp_source<A>(remote_addr: A, local_addr: A, connections: u32) -> JoinHandle<()>
+pub fn start_udp_source<'a, 'b, A>(remote_addr: A, local_addr: A, connections: u32, sync: &'a RwLock<SyncStatus>, scope: &'a Scope<'a, 'b>) -> ScopedJoinHandle<'a, ()>
 where A: 'static + ToSocketAddrs + Send + Copy + Sync
 {
-    let receive = thread::spawn(move || {
+    scope.spawn(move || {
         let socket = UdpSocket::bind(local_addr).unwrap();
         socket.connect(remote_addr).unwrap();
         let aoip = AoIP(Udp(socket));
-    
-        start_on_transport(aoip, jack::AudioOut::default(), connections);
-    });
-
-    receive
+        start_on_transport(aoip, jack::AudioOut::default(), connections, sync);
+    })
 }
 
 /**
@@ -67,50 +79,18 @@ let sink = start_udp_sink(RECV_ADDR, SEND_ADDR, 2);
 sink.join().unwrap();
 ```
  */
-pub fn start_udp_sink<A>(remote_addr: A, local_addr: A, connections: u32) -> JoinHandle<()>
+pub fn start_udp_sink<'a, 'b, A>(remote_addr: A, local_addr: A, connections: u32, sync: &'a RwLock<SyncStatus>, scope: &'a Scope<'a, 'b>) -> ScopedJoinHandle<'a, ()>
 where A: 'static + ToSocketAddrs + Send + Copy + Sync
 {
-    let send = thread::spawn(move || {
+    scope.spawn(move || {
         let socket = UdpSocket::bind(local_addr).unwrap();
         socket.connect(remote_addr).unwrap();
         let aoip = AoIP(Udp(socket));
-        start_on_transport(aoip, jack::AudioIn::default(), connections);
-    });
-    
-    send
+        start_on_transport(aoip, jack::AudioIn::default(), connections, sync);
+    })
 }
 
-
-/**
-Untested, why would you use tcp?
- */
-pub fn start_tcp_sink<A>(remote_addr: A) -> JoinHandle<()>
-where A: 'static + ToSocketAddrs + Send + Copy + Sync
-{  
-    let send = thread::spawn(move || {
-        let stream: TcpStream = TcpStream::connect(remote_addr).unwrap();
-        let send_socket: AoIP<Tcp> = AoIP(Tcp::Stream(stream));
-        start_on_transport(send_socket, jack::AudioIn::default(), 2);
-    });
-    
-    send    
-}
-
-/**
-Untested, why would you use tcp?
- */
-pub fn start_tcp_source<A>(local_addr: A) -> JoinHandle<()>
-where A: 'static + ToSocketAddrs + Send + Copy + Sync
-{
-    let receive = thread::spawn(move || {
-        let listen: TcpListener = TcpListener::bind(local_addr).unwrap();
-        let recv_socket: AoIP<Tcp> = AoIP(Tcp::_Listener(listen));
-        start_on_transport(recv_socket, jack::AudioOut::default(), 2);
-    });
-    receive
-}
-
-fn start_on_transport<P, T>(mut socket: AoIP<T>, port_spec: P, connections: u32) -> ExitCode
+fn start_on_transport<P, T>(mut socket: AoIP<T>, port_spec: P, connections: u32, sync: &RwLock<SyncStatus>) -> ExitCode
 where P: 'static + PortSpec + Send + Copy, T: 'static + NetworkModel + Sized + Send,
 {
 
@@ -165,15 +145,11 @@ where P: 'static + PortSpec + Send + Copy, T: 'static + NetworkModel + Sized + S
             .unwrap(); 
         vec.push(port);
     };
-    
+
     // Create a generalized callback for all of the ports
     let process_callback = 
-    move |client: &Client, ps: &ProcessScope| -> Control {
-        if client.transport().query_state().expect("Failed to query transport state") == jack::TransportState::Rolling {
-            // changed to if statement from match, I would have to imagine 1 bool check
-            // is faster than a match check, don't know if this is true.
-            // but it gets run *a lot* so it can't hurt.
-            
+    move |_: &Client, ps: &ProcessScope| -> Control {
+        if sync.read().expect("Either, this thread already has a read lock, or, it has been poisoned (writer crashed).").running {
             // AudioIn
             if is_input {
                 // Go thru all the ports.
@@ -210,7 +186,7 @@ where P: 'static + PortSpec + Send + Copy, T: 'static + NetworkModel + Sized + S
     
     // Activate
     let process = ClosureProcessHandler::new(process_callback);
-    let _active_client = client.activate_async(
+    client.activate_async(
         Notifications(false),
         process)
         .unwrap();

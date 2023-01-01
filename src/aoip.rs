@@ -139,6 +139,7 @@ receive.join().unwrap();
  */
 pub struct AoIP<T>(pub T) where T: NetworkModel + Sized;
 
+
 pub enum Tcp {
     /** Used for both stream data *to* and *from* a socket. */
     Stream(TcpStream),
