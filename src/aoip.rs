@@ -46,7 +46,7 @@ the passed "`output`" array. So long as `u8` array as a length of **x4** longer
 than the `f32` array, no problems should arise.
  */
 #[inline]
- fn u8_to_f32_array(array: &[u8], output: &mut [f32]) {
+fn u8_to_f32_array(array: &[u8], output: &mut [f32]) {
     for buffer_index in 0..output.len() {
         let mut byte_array:[u8;4]=[0;4];
         // put the four u8 into a sized array

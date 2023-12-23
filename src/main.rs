@@ -4,16 +4,16 @@ mod notification;
 mod aoip;
 
 use core::slice;
-use std::{net::{UdpSocket, ToSocketAddrs, TcpListener, TcpStream}, thread::{self, JoinHandle}, process::ExitCode};
+use std::{net::{UdpSocket, ToSocketAddrs}, thread::{self, JoinHandle}, process::ExitCode, sync::{RwLock, Arc}};
 
-use aoip::{AoIP, NetworkModel, Udp, Tcp};
+use aoip::{AoIP, NetworkModel, Udp};
 use jack::{Client, Control, ClosureProcessHandler, ProcessScope, PortSpec, jack_sys::{JackPortIsInput, JackPortIsOutput}};
 use notification::Notifications;
 /**
 buffer size of jack
  */
 const BUFFER_SIZE: usize = 1024;
-const LOCAL_ADDR: &str = "192.168.1.199:8096";
+const LOCAL_ADDR: &str = "192.168.1.199:5000";
 const REMOTE_ADDR: &str = "192.168.1.42:8096";
 
 fn main() {
@@ -23,12 +23,33 @@ fn main() {
     // TODO allow for buffer size to be chosen after compile, via lazy static and array slices
     // TODO put in a buffer of 0s when transport stops
     // TODO add transport control / syncing
+    let running = false;
 
-    let source = start_udp_source(REMOTE_ADDR, LOCAL_ADDR, 2);
-    let sink = start_udp_sink(REMOTE_ADDR, LOCAL_ADDR, 2);
+    let rwlock = Arc::new(RwLock::new(running));
+    
+    // let source = start_udp_source(REMOTE_ADDR, LOCAL_ADDR, 2);
+    let sink = start_udp_sink(REMOTE_ADDR, LOCAL_ADDR, 2, rwlock.clone());
 
-    source.join().unwrap();
-    sink.join().unwrap();
+    // Do control logic for if it should be sending 
+
+    println!("Press ENTER to toggle state");
+    loop {
+        let stdin = std::io::stdin();
+        let mut buf = String::new(); 
+        stdin.read_line(&mut buf).unwrap();
+        
+        // This allows for the read lock to drop so that we can
+        // write to the value in the match statement. 
+        let save = *rwlock.read().unwrap(); 
+        match save {
+            true => *rwlock.write().unwrap() = false,
+            false => *rwlock.write().unwrap() = true,
+        }
+        println!("Changed to: {}", *rwlock.read().unwrap());
+        
+    } 
+    // source.join().unwrap();
+    // sink.join().unwrap();
 }
 
 /**
@@ -42,15 +63,14 @@ let source = start_udp_source(SEND_ADDR, RECV_ADDR, 2);
 source.join().unwrap();
 ```
  */
-pub fn start_udp_source<A>(remote_addr: A, local_addr: A, connections: u32) -> JoinHandle<()>
+pub fn start_udp_source<A>(remote_addr: A, local_addr: A, connections: u32, running: Arc<RwLock<bool>>) -> JoinHandle<()>
 where A: 'static + ToSocketAddrs + Send + Copy + Sync
 {
     let receive = thread::spawn(move || {
         let socket = UdpSocket::bind(local_addr).unwrap();
         socket.connect(remote_addr).unwrap();
         let aoip = AoIP(Udp(socket));
-    
-        start_on_transport(aoip, jack::AudioOut::default(), connections);
+        wait_on_signal(aoip, jack::AudioOut::default(), connections, running);
     });
 
     receive
@@ -67,50 +87,20 @@ let sink = start_udp_sink(RECV_ADDR, SEND_ADDR, 2);
 sink.join().unwrap();
 ```
  */
-pub fn start_udp_sink<A>(remote_addr: A, local_addr: A, connections: u32) -> JoinHandle<()>
+pub fn start_udp_sink<A>(remote_addr: A, local_addr: A, connections: u32, running: Arc<RwLock<bool>>) -> JoinHandle<()>
 where A: 'static + ToSocketAddrs + Send + Copy + Sync
 {
     let send = thread::spawn(move || {
         let socket = UdpSocket::bind(local_addr).unwrap();
         socket.connect(remote_addr).unwrap();
         let aoip = AoIP(Udp(socket));
-        start_on_transport(aoip, jack::AudioIn::default(), connections);
+        wait_on_signal(aoip, jack::AudioIn::default(), connections, running);
     });
     
     send
 }
 
-
-/**
-Untested, why would you use tcp?
- */
-pub fn start_tcp_sink<A>(remote_addr: A) -> JoinHandle<()>
-where A: 'static + ToSocketAddrs + Send + Copy + Sync
-{  
-    let send = thread::spawn(move || {
-        let stream: TcpStream = TcpStream::connect(remote_addr).unwrap();
-        let send_socket: AoIP<Tcp> = AoIP(Tcp::Stream(stream));
-        start_on_transport(send_socket, jack::AudioIn::default(), 2);
-    });
-    
-    send    
-}
-
-/**
-Untested, why would you use tcp?
- */
-pub fn start_tcp_source<A>(local_addr: A) -> JoinHandle<()>
-where A: 'static + ToSocketAddrs + Send + Copy + Sync
-{
-    let receive = thread::spawn(move || {
-        let listen: TcpListener = TcpListener::bind(local_addr).unwrap();
-        let recv_socket: AoIP<Tcp> = AoIP(Tcp::_Listener(listen));
-        start_on_transport(recv_socket, jack::AudioOut::default(), 2);
-    });
-    receive
-}
-
-fn start_on_transport<P, T>(mut socket: AoIP<T>, port_spec: P, connections: u32) -> ExitCode
+fn wait_on_signal<P, T>(mut socket: AoIP<T>, port_spec: P, connections: u32, running: Arc<RwLock<bool>>) -> ExitCode
 where P: 'static + PortSpec + Send + Copy, T: 'static + NetworkModel + Sized + Send,
 {
 
@@ -168,44 +158,45 @@ where P: 'static + PortSpec + Send + Copy, T: 'static + NetworkModel + Sized + S
     
     // Create a generalized callback for all of the ports
     let process_callback = 
-    move |client: &Client, ps: &ProcessScope| -> Control {
-        if client.transport().query_state().expect("Failed to query transport state") == jack::TransportState::Rolling {
-            // changed to if statement from match, I would have to imagine 1 bool check
-            // is faster than a match check, don't know if this is true.
-            // but it gets run *a lot* so it can't hurt.
-            
-            // AudioIn
-            if is_input {
-                // Go thru all the ports.
-                vec.iter().for_each(|f| {
-                    // Get audio buffer.
-                    let slice = unsafe {
-                        // This code is taken from the impl of Port<AudioIn>
-                        slice::from_raw_parts(
-                            f.buffer(ps.n_frames()) as *const f32,
-                            ps.n_frames() as usize,
-                        )
-                    };
-                    socket.0.send(slice);
-                });
+    move |_: &Client, ps: &ProcessScope| -> Control {
+        match running.read() {
+            Ok(val) => {
+                if *val {
+                    // AudioIn
+                    if is_input {
+                        // Go thru all the ports.
+                        vec.iter().for_each(|f| {
+                            // Get audio buffer.
+                            let slice = unsafe {
+                                // This code is taken from the impl of Port<AudioIn>
+                                slice::from_raw_parts(
+                                    f.buffer(ps.n_frames()) as *const f32,
+                                    ps.n_frames() as usize,
+                                )
+                            };
+                            socket.0.send(slice);
+                        });
+                    }
+                    
+                    // AudioOut
+                    else if is_output {
+                        // Go thru all the ports.
+                        vec.iter_mut().for_each(|f| {
+                            // Get audio buffer.
+                            let mut_slice = unsafe {
+                                slice::from_raw_parts_mut(
+                                    f.buffer(ps.n_frames()) as *mut f32,
+                                    ps.n_frames() as usize
+                                )
+                            };
+                            socket.0.receive(mut_slice);
+                        });
+                    }
+                }
+                jack::Control::Continue
             }
-            
-            // AudioOut
-            else if is_output {
-                // Go thru all the ports.
-                vec.iter_mut().for_each(|f| {
-                    // Get audio buffer.
-                    let mut_slice = unsafe {
-                        slice::from_raw_parts_mut(
-                            f.buffer(ps.n_frames()) as *mut f32,
-                            ps.n_frames() as usize
-                        )
-                    };
-                    socket.0.receive(mut_slice);
-                });
-            }
-        };
-        jack::Control::Continue
+            Err(_) => todo!(),
+        }
     };
     
     // Activate
@@ -215,6 +206,6 @@ where P: 'static + PortSpec + Send + Copy, T: 'static + NetworkModel + Sized + S
         process)
         .unwrap();
 
-    loop{}
-    // ExitCode::SUCCESS // unreachable
+    loop {}
+//    ExitCode::SUCCESS // unreachable
 }
